@@ -1,4 +1,4 @@
-module github.com/exchange/trading-system/services/risk-engine
+module github.com/nguyen-anh-hao/risk-engine
 
 go 1.25.0
 
