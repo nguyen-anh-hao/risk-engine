@@ -69,3 +69,4 @@ GET http://localhost:9002/balances?account_id=1001
 | **v1.1.0** | **gRPC & Protobuf Migration** | Switch from HTTP REST to native gRPC server with Server Reflection. Reduces serialization time by 4x. |
 | **v1.2.0** | **Portfolio Margin & Haircut Algorithms** | Replace simple linear cash check with cross-asset portfolio margin (VaR - Value at Risk / SPAN margin simulation) computed in sub-millisecond time. Implement Redis Lua scripts to atomize lock & verify checks under high concurrent burst orders. |
 | **v2.0.0** | **Sharded Lock-Free In-Memory State** | Eliminate Redis network roundtrips by pinning accounts to CPU-core sharded Go channels (Actor Model / LMAX pattern). State persisted via append-only write-ahead log (WAL) on NVMe SSD with zero lock contention. Throughput: > 500,000 risk checks/sec. |
+

@@ -28,3 +28,4 @@ Content-Type: application/json
 
 ### Get Account Balances
 GET http://localhost:9002/balances?account_id=1001
+
