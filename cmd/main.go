@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/exchange/trading-system/services/risk-engine/internal/handler"
-	"github.com/exchange/trading-system/services/risk-engine/internal/metrics"
-	"github.com/exchange/trading-system/services/risk-engine/internal/service"
-	"github.com/exchange/trading-system/services/risk-engine/internal/telemetry"
+	"github.com/nguyen-anh-hao/risk-engine/internal/handler"
+	"github.com/nguyen-anh-hao/risk-engine/internal/metrics"
+	"github.com/nguyen-anh-hao/risk-engine/internal/service"
+	"github.com/nguyen-anh-hao/risk-engine/internal/telemetry"
 )
 
 func env(key, def string) string {

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/exchange/trading-system/services/risk-engine/internal/domain"
-	"github.com/exchange/trading-system/services/risk-engine/internal/service"
+	"github.com/nguyen-anh-hao/risk-engine/internal/domain"
+	"github.com/nguyen-anh-hao/risk-engine/internal/service"
 )
 
 type Handler struct {
