@@ -11,7 +11,9 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/nguyen-anh-hao/risk-engine/internal/handler"
+	"github.com/nguyen-anh-hao/risk-engine/internal/journal"
 	"github.com/nguyen-anh-hao/risk-engine/internal/metrics"
+	"github.com/nguyen-anh-hao/risk-engine/internal/outbox"
 	"github.com/nguyen-anh-hao/risk-engine/internal/service"
 	"github.com/nguyen-anh-hao/risk-engine/internal/storage"
 	"github.com/nguyen-anh-hao/risk-engine/internal/store"
@@ -66,13 +68,32 @@ func main() {
 		slog.Error("redis unavailable; risk-engine requires shared state", "err", pingErr)
 		os.Exit(1)
 	}
-	st := store.NewRedis(rdb)
-	defer func() { _ = st.Close() }()
-	if err := st.Seed(context.Background(), storage.InitialBalances()); err != nil {
+	redisStore := store.NewRedis(rdb)
+	defer func() { _ = redisStore.Close() }()
+	if err := redisStore.Seed(context.Background(), storage.InitialBalances()); err != nil {
 		slog.Error("balance seed failed", "err", err)
 		os.Exit(1)
 	}
-	svc := service.New(st)
+
+	enc, err := outbox.NewEncoder(env("SCHEMA_REGISTRY_URL", "http://localhost:8081"), "exchange.risk.RiskEvent")
+	if err != nil {
+		slog.Error("risk outbox Avro encoder unavailable", "err", err)
+		os.Exit(1)
+	}
+	pg, err := store.NewPostgres(context.Background(), env("RISK_DB_DSN", "postgres://settlement:settlement@localhost:5432/risk?sslmode=disable"), enc)
+	if err != nil {
+		slog.Error("risk PostgreSQL unavailable", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = pg.Close() }()
+	if err := pg.Seed(context.Background(), storage.InitialBalances()); err != nil {
+		slog.Error("risk DB seed failed", "err", err)
+		os.Exit(1)
+	}
+	redisStore.SetFallback(pg)
+	go journal.New(rdb, redisStore, pg).Run(context.Background())
+
+	svc := service.New(redisStore)
 	h := handler.New(svc)
 
 	// 1. Initialize structured logging first (slog -> OTLP gRPC -> Loki, plus JSON stdout).

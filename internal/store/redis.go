@@ -4,11 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/nguyen-anh-hao/risk-engine/internal/domain"
 )
+
+func journal(accountID uint64, eventType, asset string, amount, reserved, actual, fee, qty float64) string {
+	b, _ := json.Marshal(domain.JournalEvent{
+		EventID: uuid.NewString(), EventType: eventType, AccountID: accountID,
+		Asset: asset, Amount: amount, Reserved: reserved, Actual: actual,
+		Fee: fee, Qty: qty, OccurredAt: time.Now().UnixNano(),
+	})
+	return string(b)
+}
 
 func accountKey(accountID uint64) string {
 	return fmt.Sprintf("risk:acct:%d", accountID)
@@ -34,6 +45,7 @@ if b.available < amt then return 0 end
 b.available = b.available - amt
 b.frozen = b.frozen + amt
 putb(KEYS[1], ARGV[1], b)
+redis.call('XADD', 'risk:journal', 'MAXLEN', '~', '100000', '*', 'payload', ARGV[3])
 return 1
 `)
 
@@ -44,6 +56,7 @@ b.available = b.available + amt
 b.frozen = b.frozen - amt
 if b.frozen < 0 then b.frozen = 0 end
 putb(KEYS[1], ARGV[1], b)
+redis.call('XADD', 'risk:journal', 'MAXLEN', '~', '100000', '*', 'payload', ARGV[3])
 return 1
 `)
 
@@ -61,6 +74,7 @@ local stock = getb(KEYS[1], ARGV[5])
 stock.total = stock.total + qty
 stock.available = stock.available + qty
 putb(KEYS[1], ARGV[5], stock)
+redis.call('XADD', 'risk:journal', 'MAXLEN', '~', '100000', '*', 'payload', ARGV[6])
 return 1
 `)
 
@@ -75,6 +89,7 @@ local cash = getb(KEYS[1], 'CASH')
 cash.total = cash.total + proceeds
 cash.available = cash.available + proceeds
 putb(KEYS[1], 'CASH', cash)
+redis.call('XADD', 'risk:journal', 'MAXLEN', '~', '100000', '*', 'payload', ARGV[4])
 return 1
 `)
 
@@ -84,6 +99,7 @@ local amt = tonumber(ARGV[2])
 b.total = b.total + amt
 b.available = b.available + amt
 putb(KEYS[1], ARGV[1], b)
+redis.call('XADD', 'risk:journal', 'MAXLEN', '~', '100000', '*', 'payload', ARGV[3])
 return 1
 `)
 
@@ -94,14 +110,19 @@ if b.available < amt then return 0 end
 b.total = b.total - amt
 b.available = b.available - amt
 putb(KEYS[1], ARGV[1], b)
+redis.call('XADD', 'risk:journal', 'MAXLEN', '~', '100000', '*', 'payload', ARGV[3])
 return 1
 `)
 
 type RedisStore struct {
-	rdb *redis.Client
+	rdb      *redis.Client
+	fallback *Postgres
 }
 
 func NewRedis(rdb *redis.Client) *RedisStore { return &RedisStore{rdb: rdb} }
+
+// SetFallback enables PostgreSQL reads when a Redis projection key is missing.
+func (s *RedisStore) SetFallback(pg *Postgres) { s.fallback = pg }
 
 // Seed inserts missing initial balances without overwriting live state.
 func (s *RedisStore) Seed(ctx context.Context, initial map[uint64]map[string]float64) error {
@@ -124,6 +145,9 @@ func (s *RedisStore) Seed(ctx context.Context, initial map[uint64]map[string]flo
 func (s *RedisStore) Get(ctx context.Context, accountID uint64, asset string) (domain.Balance, error) {
 	raw, err := s.rdb.HGet(ctx, accountKey(accountID), asset).Bytes()
 	if err == redis.Nil {
+		if s.fallback != nil {
+			return s.fallback.GetBalance(ctx, accountID, asset)
+		}
 		return domain.Balance{Asset: asset}, nil
 	}
 	if err != nil {
@@ -138,8 +162,14 @@ func (s *RedisStore) Get(ctx context.Context, accountID uint64, asset string) (d
 
 func (s *RedisStore) List(ctx context.Context, accountID uint64) ([]domain.Balance, error) {
 	items, err := s.rdb.HGetAll(ctx, accountKey(accountID)).Result()
+	if err != nil && s.fallback != nil {
+		return s.fallback.ListBalances(ctx, accountID)
+	}
 	if err != nil {
 		return nil, err
+	}
+	if len(items) == 0 && s.fallback != nil {
+		return s.fallback.ListBalances(ctx, accountID)
 	}
 	out := make([]domain.Balance, 0, len(items))
 	for _, raw := range items {
@@ -152,7 +182,8 @@ func (s *RedisStore) List(ctx context.Context, accountID uint64) ([]domain.Balan
 }
 
 func (s *RedisStore) Reserve(ctx context.Context, accountID uint64, asset string, amount float64) error {
-	ok, err := reserveScript.Run(ctx, s.rdb, []string{accountKey(accountID)}, asset, amount).Int()
+	ok, err := reserveScript.Run(ctx, s.rdb, []string{accountKey(accountID)},
+		asset, amount, journal(accountID, "BalanceReserved", asset, amount, 0, 0, 0, 0)).Int()
 	if err != nil {
 		return err
 	}
@@ -163,24 +194,30 @@ func (s *RedisStore) Reserve(ctx context.Context, accountID uint64, asset string
 }
 
 func (s *RedisStore) Release(ctx context.Context, accountID uint64, asset string, amount float64) error {
-	return releaseScript.Run(ctx, s.rdb, []string{accountKey(accountID)}, asset, amount).Err()
+	return releaseScript.Run(ctx, s.rdb, []string{accountKey(accountID)},
+		asset, amount, journal(accountID, "BalanceReleased", asset, amount, 0, 0, 0, 0)).Err()
 }
 
 func (s *RedisStore) ApplyBuy(ctx context.Context, accountID uint64, stockAsset string, reserved, actual, fee, qty float64) error {
 	return applyBuyScript.Run(ctx, s.rdb, []string{accountKey(accountID)},
-		reserved, actual, fee, qty, stockAsset).Err()
+		reserved, actual, fee, qty, stockAsset,
+		journal(accountID, "BalanceAppliedBuy", stockAsset, 0, reserved, actual, fee, qty)).Err()
 }
 
 func (s *RedisStore) ApplySell(ctx context.Context, accountID uint64, stockAsset string, qty, proceeds float64) error {
-	return applySellScript.Run(ctx, s.rdb, []string{accountKey(accountID)}, qty, proceeds, stockAsset).Err()
+	return applySellScript.Run(ctx, s.rdb, []string{accountKey(accountID)},
+		qty, proceeds, stockAsset,
+		journal(accountID, "BalanceAppliedSell", stockAsset, proceeds, 0, 0, 0, qty)).Err()
 }
 
 func (s *RedisStore) Deposit(ctx context.Context, accountID uint64, asset string, amount float64) error {
-	return depositScript.Run(ctx, s.rdb, []string{accountKey(accountID)}, asset, amount).Err()
+	return depositScript.Run(ctx, s.rdb, []string{accountKey(accountID)},
+		asset, amount, journal(accountID, "BalanceDeposited", asset, amount, 0, 0, 0, 0)).Err()
 }
 
 func (s *RedisStore) Withdraw(ctx context.Context, accountID uint64, asset string, amount float64) error {
-	ok, err := withdrawScript.Run(ctx, s.rdb, []string{accountKey(accountID)}, asset, amount).Int()
+	ok, err := withdrawScript.Run(ctx, s.rdb, []string{accountKey(accountID)},
+		asset, amount, journal(accountID, "BalanceWithdrawn", asset, amount, 0, 0, 0, 0)).Int()
 	if err != nil {
 		return err
 	}
@@ -188,6 +225,22 @@ func (s *RedisStore) Withdraw(ctx context.Context, accountID uint64, asset strin
 		return ErrInsufficient
 	}
 	return nil
+}
+
+// Snapshot returns all balances for the journal worker's DB materialization.
+func (s *RedisStore) Snapshot(ctx context.Context, accountID uint64) ([]domain.Balance, error) {
+	items, err := s.rdb.HGetAll(ctx, accountKey(accountID)).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Balance, 0, len(items))
+	for _, raw := range items {
+		var b domain.Balance
+		if json.Unmarshal([]byte(raw), &b) == nil {
+			out = append(out, b)
+		}
+	}
+	return out, nil
 }
 
 func (s *RedisStore) Close() error { return s.rdb.Close() }
