@@ -8,9 +8,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/nguyen-anh-hao/risk-engine/internal/handler"
 	"github.com/nguyen-anh-hao/risk-engine/internal/metrics"
 	"github.com/nguyen-anh-hao/risk-engine/internal/service"
+	"github.com/nguyen-anh-hao/risk-engine/internal/storage"
+	"github.com/nguyen-anh-hao/risk-engine/internal/store"
 	"github.com/nguyen-anh-hao/risk-engine/internal/telemetry"
 )
 
@@ -48,7 +52,27 @@ func metricsMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
-	svc := service.New()
+	// Risk state is shared in Redis; the service must never keep balances in
+	// process memory if it is going to run as multiple replicas.
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     env("REDIS_ADDR", "localhost:6379"),
+		Password: env("REDIS_PASSWORD", ""),
+		DB:       0,
+	})
+	pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	pingErr := rdb.Ping(pingCtx).Err()
+	cancel()
+	if pingErr != nil {
+		slog.Error("redis unavailable; risk-engine requires shared state", "err", pingErr)
+		os.Exit(1)
+	}
+	st := store.NewRedis(rdb)
+	defer func() { _ = st.Close() }()
+	if err := st.Seed(context.Background(), storage.InitialBalances()); err != nil {
+		slog.Error("balance seed failed", "err", err)
+		os.Exit(1)
+	}
+	svc := service.New(st)
 	h := handler.New(svc)
 
 	// 1. Initialize structured logging first (slog -> OTLP gRPC -> Loki, plus JSON stdout).

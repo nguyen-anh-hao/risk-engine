@@ -3,11 +3,13 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/nguyen-anh-hao/risk-engine/internal/domain"
 	"github.com/nguyen-anh-hao/risk-engine/internal/service"
+	"github.com/nguyen-anh-hao/risk-engine/internal/store"
 )
 
 type Handler struct {
@@ -51,28 +53,55 @@ func (h *Handler) check(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, h.svc.Check(req))
+	resp, err := h.svc.Check(r.Context(), req)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "balance store unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) reserve(w http.ResponseWriter, r *http.Request) {
 	var req service.CheckRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	_ = h.svc.Reserve(req)
-	writeJSON(w, map[string]bool{"success": true})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if err := h.svc.Reserve(r.Context(), req); err != nil {
+		if errors.Is(err, store.ErrInsufficient) {
+			writeErr(w, http.StatusConflict, "insufficient balance")
+			return
+		}
+		writeErr(w, http.StatusServiceUnavailable, "balance store unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *Handler) release(w http.ResponseWriter, r *http.Request) {
 	var req service.CheckRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	_ = h.svc.Release(req)
-	writeJSON(w, map[string]bool{"success": true})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if err := h.svc.Release(r.Context(), req); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "balance store unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *Handler) apply(w http.ResponseWriter, r *http.Request) {
 	var req service.ApplyRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	_ = h.svc.Apply(req)
-	writeJSON(w, map[string]bool{"success": true})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if err := h.svc.Apply(r.Context(), req); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "balance store unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *Handler) deposit(w http.ResponseWriter, r *http.Request) {
@@ -81,10 +110,16 @@ func (h *Handler) deposit(w http.ResponseWriter, r *http.Request) {
 		Asset     string `json:"asset"`
 		Amount    string `json:"amount"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
 	amount, _ := strconv.ParseFloat(req.Amount, 64)
-	h.svc.Deposit(req.AccountID, req.Asset, amount)
-	writeJSON(w, map[string]bool{"success": true})
+	if err := h.svc.Deposit(r.Context(), req.AccountID, req.Asset, amount); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "balance store unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *Handler) withdraw(w http.ResponseWriter, r *http.Request) {
@@ -93,30 +128,46 @@ func (h *Handler) withdraw(w http.ResponseWriter, r *http.Request) {
 		Asset     string `json:"asset"`
 		Amount    string `json:"amount"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	amount, _ := strconv.ParseFloat(req.Amount, 64)
-	if err := h.svc.Withdraw(req.AccountID, req.Asset, amount); err != nil {
-		writeJSON(w, map[string]interface{}{"success": false, "reason": err.Error()})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	writeJSON(w, map[string]bool{"success": true})
+	amount, _ := strconv.ParseFloat(req.Amount, 64)
+	if err := h.svc.Withdraw(r.Context(), req.AccountID, req.Asset, amount); err != nil {
+		if errors.Is(err, store.ErrInsufficient) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"success": false, "reason": err.Error()})
+			return
+		}
+		writeErr(w, http.StatusServiceUnavailable, "balance store unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *Handler) balances(w http.ResponseWriter, r *http.Request) {
 	accountID, _ := strconv.ParseUint(r.URL.Query().Get("account_id"), 10, 64)
-	bs := h.svc.GetBalances(accountID)
+	bs, err := h.svc.GetBalances(r.Context(), accountID)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "balance store unavailable")
+		return
+	}
 	out := make([]balanceOut, 0, len(bs))
 	for _, b := range bs {
 		out = append(out, toBalanceOut(b))
 	}
-	writeJSON(w, out)
+	writeJSON(w, http.StatusOK, out)
 }
 
-func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"status": "ok"})
+func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func writeJSON(w http.ResponseWriter, v interface{}) {
+func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
 }

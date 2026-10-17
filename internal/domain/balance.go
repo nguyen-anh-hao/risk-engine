@@ -1,4 +1,5 @@
-// Package domain contains the risk engine's in-memory shadow-balance model.
+// Package domain contains the risk engine's balance model. The documents are
+// persisted in Redis, not in process memory.
 package domain
 
 // Balance is the shadow view of a single asset for an account:

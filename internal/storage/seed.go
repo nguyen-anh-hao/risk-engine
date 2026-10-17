@@ -1,7 +1,5 @@
-// Package storage contains the PostgreSQL sync/fallback for the risk engine.
-// In production the risk engine loads its initial shadow-balance snapshot from
-// PostgreSQL and periodically reconciles; here it returns deterministic mock
-// data so the service can run standalone.
+// Package storage contains the deterministic initial balance seed.
+// Balances themselves live in Redis; this file only bootstraps demo accounts.
 package storage
 
 // InitialBalances maps accountID -> asset -> amount.
