@@ -13,8 +13,12 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/nguyen-anh-hao/risk-engine/internal/domain"
+	"github.com/nguyen-anh-hao/risk-engine/internal/metrics"
 	"github.com/nguyen-anh-hao/risk-engine/internal/store"
 )
+
+var journalApplyErrors = metrics.Default.Counter(
+	"trading_risk_journal_apply_errors_total", "Risk journal DB/outbox apply failures.")
 
 const (
 	Stream = "risk:journal"
@@ -89,6 +93,7 @@ func (w *Worker) handle(ctx context.Context, msg redis.XMessage) {
 			_ = w.rdb.XAck(ctx, Stream, Group, msg.ID).Err()
 			return
 		} else {
+			journalApplyErrors.Inc()
 			slog.Warn("risk journal DB apply failed, retrying", "id", msg.ID, "err", err)
 		}
 		select {

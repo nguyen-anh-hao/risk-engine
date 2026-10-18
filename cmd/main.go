@@ -91,6 +91,31 @@ func main() {
 		os.Exit(1)
 	}
 	redisStore.SetFallback(pg)
+	if err := redisStore.RebuildMissing(context.Background(), pg); err != nil {
+		slog.Warn("risk Redis projection rebuild failed", "err", err)
+	}
+	journalLen := metrics.Default.Gauge("trading_risk_journal_length", "risk:journal stream length.")
+	journalPending := metrics.Default.Gauge("trading_risk_journal_pending", "risk:journal pending entries.")
+	journalLag := metrics.Default.Gauge("trading_risk_journal_lag_seconds", "risk:journal producer-to-now lag.")
+	outboxPending := metrics.Default.Gauge("trading_outbox_pending", "Pending outbox rows.", "service")
+	outboxAge := metrics.Default.Gauge("trading_outbox_oldest_age_seconds", "Oldest pending outbox event age.", "service")
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			n, p, lag, err := redisStore.JournalStats(context.Background())
+			if err != nil {
+				continue
+			}
+			journalLen.Set(float64(n))
+			journalPending.Set(float64(p))
+			journalLag.Set(lag)
+			if pending, age, err := pg.OutboxStats(context.Background()); err == nil {
+				outboxPending.Set(float64(pending), "risk-engine")
+				outboxAge.Set(age, "risk-engine")
+			}
+		}
+	}()
 	go journal.New(rdb, redisStore, pg).Run(context.Background())
 
 	svc := service.New(redisStore)

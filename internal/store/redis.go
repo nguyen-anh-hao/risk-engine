@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,6 +126,25 @@ func NewRedis(rdb *redis.Client) *RedisStore { return &RedisStore{rdb: rdb} }
 // SetFallback enables PostgreSQL reads when a Redis projection key is missing.
 func (s *RedisStore) SetFallback(pg *Postgres) { s.fallback = pg }
 
+// RebuildMissing hydrates Redis keys that were lost without overwriting live
+// balances. It is safe to run on every replica at startup.
+func (s *RedisStore) RebuildMissing(ctx context.Context, pg *Postgres) error {
+	rows, err := pg.AllBalances(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range rows {
+		raw, err := json.Marshal(rec.Balance)
+		if err != nil {
+			return err
+		}
+		if err := s.rdb.HSetNX(ctx, accountKey(rec.AccountID), rec.Balance.Asset, raw).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Seed inserts missing initial balances without overwriting live state.
 func (s *RedisStore) Seed(ctx context.Context, initial map[uint64]map[string]float64) error {
 	for accountID, balances := range initial {
@@ -225,6 +246,29 @@ func (s *RedisStore) Withdraw(ctx context.Context, accountID uint64, asset strin
 		return ErrInsufficient
 	}
 	return nil
+}
+
+// JournalStats exposes Redis Stream backlog/lag for monitoring.
+func (s *RedisStore) JournalStats(ctx context.Context) (length, pending int64, lagSeconds float64, err error) {
+	length, err = s.rdb.XLen(ctx, "risk:journal").Result()
+	if err != nil {
+		return
+	}
+	pend, perr := s.rdb.XPending(ctx, "risk:journal", "risk-journal").Result()
+	if perr == nil && pend != nil {
+		pending = pend.Count
+	}
+	info, ierr := s.rdb.XInfoStream(ctx, "risk:journal").Result()
+	if ierr == nil && info != nil && info.LastGeneratedID != "" {
+		parts := strings.SplitN(info.LastGeneratedID, "-", 2)
+		if ms, perr := strconv.ParseInt(parts[0], 10, 64); perr == nil {
+			lagSeconds = time.Since(time.UnixMilli(ms)).Seconds()
+			if lagSeconds < 0 {
+				lagSeconds = 0
+			}
+		}
+	}
+	return
 }
 
 // Snapshot returns all balances for the journal worker's DB materialization.

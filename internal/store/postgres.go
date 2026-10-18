@@ -139,6 +139,33 @@ func (p *Postgres) ListBalances(ctx context.Context, accountID uint64) ([]domain
 	return out, rows.Err()
 }
 
+// AccountBalance pairs an account id with one balance document.
+type AccountBalance struct {
+	AccountID uint64
+	Balance   domain.Balance
+}
+
+func (p *Postgres) AllBalances(ctx context.Context) ([]AccountBalance, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT account_id, asset, total, available, frozen FROM risk_balances`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AccountBalance{}
+	for rows.Next() {
+		var rec AccountBalance
+		var total, available, frozen pgtype.Numeric
+		if err := rows.Scan(&rec.AccountID, &rec.Balance.Asset, &total, &available, &frozen); err != nil {
+			return nil, err
+		}
+		rec.Balance.Total, rec.Balance.Available, rec.Balance.Frozen =
+			numValue(total), numValue(available), numValue(frozen)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
 // ApplyJournal materializes one Redis journal event into PostgreSQL and its
 // Avro outbox. Duplicate event ids are no-ops.
 func (p *Postgres) ApplyJournal(ctx context.Context, ev domain.JournalEvent, balances []domain.Balance) error {
@@ -193,4 +220,12 @@ func (p *Postgres) ApplyJournal(ctx context.Context, ev domain.JournalEvent, bal
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// OutboxStats exposes pending outbox backlog for monitoring.
+func (p *Postgres) OutboxStats(ctx context.Context) (pending int64, oldestAgeSecs float64, err error) {
+	err = p.pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(extract(epoch from now() - min(created_at)), 0)
+		FROM outbox WHERE status='PENDING'`).Scan(&pending, &oldestAgeSecs)
+	return
 }
