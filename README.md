@@ -1,72 +1,39 @@
-# Risk Engine (`risk-engine`)
+# risk-engine
 
-> **In-Memory Pre-Trade & Post-Trade Risk Management Service** built with Go.
+## Purpose
 
----
+Guards the exchange against insolvency by checking and freezing buying power before an order is allowed to match. It owns the live balance view used by the trading path, not the authoritative ledger. It does not price portfolios, compute scenario margin, or book settled money.
 
-## 1. Primary Responsibility
-The Risk Engine guarantees market integrity and protects the broker/exchange from insolvency. Every order must pass pre-trade validation (margin checks, purchasing power, order value bounds) before it is forwarded to the matching engine. It maintains in-memory shadow balances and enforces credit locks (freeze/unfreeze balance).
+## Domain knowledge
 
----
+Every asset has an available amount and a reserved amount, and only the available part can be spent. A buy checks that available cash covers price times quantity plus the estimated fee, while a sell checks that available stock covers the quantity. A reservation freezes the worst case, an application consumes the reservation and moves the assets, and a release unfreezes what was never used.
 
-## 2. Boundaries & I/O
-- **Ingress:** Called synchronously by `api-gateway` (`POST /check`, `POST /reserve`, `POST /release`).
-- **Data Stores:** 
-  - **Hot Cache:** Redis for fast distributed balance validation.
-  - **Cold Store:** PostgreSQL for durable state checkpoints.
-- **Contract Reference:** `trading-contracts/proto/risk/risk_check.proto`.
+Buy application consumes the exact amount that was frozen rather than the fill price alone, so a price improvement returns the difference to the buyer. Sell application removes stock and credits cash net of the seller fee. Every balance mutation is atomic, which is what prevents two concurrent orders from overdrawing the same account.
 
----
+The live view is a Redis projection backed by a journal; PostgreSQL holds materialized snapshots and the audit trail. A reservation belongs to one order and must be consumed or released exactly once. The service charges no margin of its own and trusts the fee estimate supplied with the order.
 
-## 3. Quick Start (Run in 2 minutes)
+## Decisions and consequences
 
-```bash
-# 1. Start dependent Redis instance
-docker run -d --name risk-redis -p 6379:6379 redis:alpine
+**Redis hot path with Lua atomicity.** Check, reserve, apply and release run as single Redis scripts, so concurrent requests cannot interleave. The cost is a hard dependency on Redis and a network hop on the critical path.
 
-# 2. Run service natively
-go run ./cmd/main.go
-```
+**Write-behind journal to PostgreSQL.** Each mutation appends to a Redis stream that a worker drains into balance snapshots and an outbox. This keeps the hot path fast, at the price of materialized-view lag and a separate rebuild path.
 
-Verify health:
-```bash
-curl http://localhost:9002/health
-```
+**Transactional outbox with CDC.** Risk events are written with the balance change and relayed to Kafka, so downstream consumers never see a balance change without its event. The cost is an outbox table and a CDC dependency.
 
----
+**Stateless service.** No business state lives in process memory, so any replica can serve any request and restarts are safe. The consequence is that Redis durability, not the process, defines the recovery point.
 
-## 4. Executable Documentation (`requests.http`)
-Use VS Code REST Client or cURL:
+**Linear cash and stock checks.** The current model is deliberately simple and predictable. Portfolio margin, value at risk and haircuts are not modeled, so the engine cannot protect against correlated multi-asset risk yet.
 
-```http
-### Health Check
-GET http://localhost:9002/health
+## Operations and known limits
 
-### Pre-trade Risk Check
-POST http://localhost:9002/check
-Content-Type: application/json
+Startup requires Redis, PostgreSQL and the schema registry; missing dependencies are fatal rather than silently local. On startup, missing balance keys are restored from PostgreSQL without overwriting live values, so a partial Redis loss does not reset an active account. Redis runs with append-only persistence because losing it loses the live view.
 
-{
-  "account_id": 1001,
-  "symbol": "AAPL",
-  "side": "BUY",
-  "type": "LIMIT",
-  "price": "150.00",
-  "quantity": "10"
-}
+The journal worker can lag, and that lag is the first signal to watch; a growing journal means balances are drifting from their audit view. Per-order reservation durability lives with the order records, not here, so this service cannot reconstruct a reservation that was never journaled. Metrics expose journal lag and balance state, the service listens on port 9002, and the health endpoint reflects process liveness only.
 
-### Read Account Balances
-GET http://localhost:9002/balances?account_id=1001
-```
+## Future direction
 
----
+Business: portfolio-level margin, scenario margin and haircuts are the intended evolution; the current linear model is a placeholder.
 
-## 5. Engineering Roadmap (Scale & Optimization Focused)
+Technical: gRPC to remove JSON overhead, then sharded in-process state with a write-ahead log to eliminate the Redis round trip. Both changes must preserve the atomic reserve semantics.
 
-| Version | Phase | Optimization Target & Algorithmic Problem |
-| :--- | :--- | :--- |
-| **v1.0.0** *(Current)* | **Baseline Risk Engine** | In-memory balance lookup with Redis sync. Simple cash & stock spot checks via HTTP/JSON. |
-| **v1.1.0** | **gRPC & Protobuf Migration** | Switch from HTTP REST to native gRPC server with Server Reflection. Reduces serialization time by 4x. |
-| **v1.2.0** | **Portfolio Margin & Haircut Algorithms** | Replace simple linear cash check with cross-asset portfolio margin (VaR - Value at Risk / SPAN margin simulation) computed in sub-millisecond time. Implement Redis Lua scripts to atomize lock & verify checks under high concurrent burst orders. |
-| **v2.0.0** | **Sharded Lock-Free In-Memory State** | Eliminate Redis network roundtrips by pinning accounts to CPU-core sharded Go channels (Actor Model / LMAX pattern). State persisted via append-only write-ahead log (WAL) on NVMe SSD with zero lock contention. Throughput: > 500,000 risk checks/sec. |
-
+Boundaries: a dedicated margin service could own scenario calculations while this service keeps the hot balance check.

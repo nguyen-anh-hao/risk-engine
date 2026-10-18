@@ -1,0 +1,18 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: risk-engine
+  description: Pre-trade checks and atomic cash/stock reservations on the Redis hot path.
+  annotations:
+    github.com/project-slug: nguyen-anh-hao/risk-engine
+  tags: [go, risk, redis]
+spec:
+  type: service
+  lifecycle: experimental
+  owner: nguyen-anh-hao
+  system: trading-exchange
+  dependsOn:
+    - resource:redis
+    - resource:postgres-risk
+    - resource:kafka
+    - resource:schema-registry

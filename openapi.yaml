@@ -1,0 +1,252 @@
+openapi: 3.0.3
+info:
+  title: Risk Engine API
+  version: 1.0.0
+  description: >-
+    Internal pre-trade risk API. Balances live in Redis; buy orders must pass a
+    check and a reserve before matching. Errors use a plain {"error": "..."} body.
+  license: { name: Proprietary }
+servers:
+  - url: http://localhost:9002
+security: []
+
+tags:
+  - name: Risk
+  - name: Balances
+  - name: Operations
+
+paths:
+  /health:
+    get:
+      tags: [Operations]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, example: ok } } }
+
+  /check:
+    post:
+      tags: [Risk]
+      summary: Check buying power without changing state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckRequest' }
+      responses:
+        '200':
+          description: Check result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /reserve:
+    post:
+      tags: [Risk]
+      summary: Freeze the worst-case cash or stock for an order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckRequest' }
+      responses:
+        '200':
+          description: Reservation succeeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { description: Insufficient available balance }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /release:
+    post:
+      tags: [Risk]
+      summary: Release a reservation that was never consumed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckRequest' }
+      responses:
+        '200':
+          description: Reservation released
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /apply:
+    post:
+      tags: [Risk]
+      summary: Apply a settled fill to both counterparties
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApplyRequest' }
+      responses:
+        '200':
+          description: Fill applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /deposit:
+    post:
+      tags: [Balances]
+      summary: Credit cash or stock (demo funding path)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AmountRequest' }
+      responses:
+        '200':
+          description: Deposit applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessResponse' }
+
+  /withdraw:
+    post:
+      tags: [Balances]
+      summary: Debit cash or stock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AmountRequest' }
+      responses:
+        '200':
+          description: Withdrawal result; insufficient funds returns success=false
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessResponse' }
+
+  /balances:
+    get:
+      tags: [Balances]
+      summary: List balances for an account
+      parameters:
+        - name: account_id
+          in: query
+          required: true
+          schema: { type: integer, format: int64, example: 1001 }
+      responses:
+        '200':
+          description: Balances
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Balance' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+components:
+  responses:
+    BadRequest:
+      description: Invalid request body
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: Balance store unavailable
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      example: { error: balance store unavailable }
+      properties:
+        error: { type: string }
+
+    SuccessResponse:
+      type: object
+      example: { success: true }
+      properties:
+        success: { type: boolean }
+        reason: { type: string }
+
+    CheckRequest:
+      type: object
+      example:
+        account_id: 1001
+        symbol: AAPL
+        side: BUY
+        type: LIMIT
+        price: "150.00"
+        quantity: "10"
+        fee: "1.50"
+      required: [account_id, symbol, side, price, quantity]
+      properties:
+        account_id: { type: integer, format: int64 }
+        symbol: { type: string }
+        side: { type: string, enum: [BUY, SELL] }
+        type: { type: string, enum: [LIMIT, MARKET], default: LIMIT }
+        price: { type: string }
+        quantity: { type: string }
+        fee: { type: string, description: Worst-case fee estimated by the caller }
+
+    ApplyRequest:
+      type: object
+      example:
+        account_id: 1001
+        symbol: AAPL
+        side: BUY
+        price: "150.00"
+        quantity: "4"
+        fee: "0.60"
+        reserved: "1501.50"
+      properties:
+        account_id: { type: integer, format: int64 }
+        symbol: { type: string }
+        side: { type: string, enum: [BUY, SELL] }
+        price: { type: string }
+        quantity: { type: string }
+        fee: { type: string }
+        reserved: { type: string, description: "Cash frozen at order time, including the fee" }
+
+    AmountRequest:
+      type: object
+      example: { account_id: 1001, asset: CASH, amount: "10000.00" }
+      required: [account_id, asset, amount]
+      properties:
+        account_id: { type: integer, format: int64 }
+        asset: { type: string, example: CASH }
+        amount: { type: string }
+
+    CheckResponse:
+      type: object
+      example:
+        approved: true
+        reject_reason: ""
+        buying_power: "20000.00"
+      properties:
+        approved: { type: boolean }
+        reject_reason: { type: string }
+        buying_power: { type: string }
+
+    Balance:
+      type: object
+      example:
+        asset: CASH
+        total: "20000.00"
+        available: "15000.00"
+        frozen: "5000.00"
+      properties:
+        asset: { type: string }
+        total: { type: string }
+        available: { type: string }
+        frozen: { type: string }
+
