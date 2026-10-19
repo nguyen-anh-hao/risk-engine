@@ -43,9 +43,13 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	duration := metrics.Default.Histogram(
 		"http_request_duration_seconds", "HTTP request latency in seconds.",
 		[]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}, "method", "path")
+	inFlight := metrics.Default.Gauge(
+		"http_requests_in_flight", "HTTP requests currently being served.", "method")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		inFlight.Add(1, r.Method)
+		defer inFlight.Add(-1, r.Method)
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 		requests.Inc(r.Method, r.URL.Path, strconv.Itoa(rec.status))
