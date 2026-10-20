@@ -44,6 +44,7 @@ func (w *Worker) Run(ctx context.Context) {
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		w.claimStale(ctx)
 		streams, err := w.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group: Group, Consumer: w.consumer,
 			Streams: []string{Stream, ">"}, Count: 20, Block: 2 * time.Second,
@@ -73,6 +74,33 @@ func (w *Worker) ensureGroup(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// claimStale takes over entries left pending by a previous consumer (for
+// example after a container restart). Without this, those entries never reach
+// the new consumer because XReadGroup only reads ">".
+func (w *Worker) claimStale(ctx context.Context) {
+	pending, err := w.rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: Stream, Group: Group, Start: "-", End: "+", Count: 50,
+	}).Result()
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(pending))
+	for _, entry := range pending {
+		ids = append(ids, entry.ID)
+	}
+	messages, err := w.rdb.XClaim(ctx, &redis.XClaimArgs{
+		Stream: Stream, Group: Group, Consumer: w.consumer,
+		MinIdle: 30 * time.Second, Messages: ids,
+	}).Result()
+	if err != nil {
+		slog.Warn("risk journal stale claim failed", "err", err)
+		return
+	}
+	for _, msg := range messages {
+		w.handle(ctx, msg)
+	}
 }
 
 func (w *Worker) handle(ctx context.Context, msg redis.XMessage) {

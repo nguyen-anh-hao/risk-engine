@@ -46,3 +46,23 @@ func TestRedisReserveApplyAreAtomicAndShared(t *testing.T) {
 		t.Fatalf("over-withdraw err = %v", err)
 	}
 }
+func TestStreamIDMillis(t *testing.T) {
+	tests := []struct {
+		id   string
+		want int64
+		ok   bool
+	}{
+		{"1792428815540-0", 1792428815540, true},
+		{"1792428815540", 1792428815540, true},
+		{"0-1", 0, true},
+		{"not-a-stream-id", 0, false},
+		{"", 0, false},
+	}
+	for _, tc := range tests {
+		got, ok := streamIDMillis(tc.id)
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("streamIDMillis(%q) = (%d, %v), want (%d, %v)", tc.id, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+

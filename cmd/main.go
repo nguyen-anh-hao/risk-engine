@@ -100,7 +100,7 @@ func main() {
 	}
 	journalLen := metrics.Default.Gauge("trading_risk_journal_length", "risk:journal stream length.")
 	journalPending := metrics.Default.Gauge("trading_risk_journal_pending", "risk:journal pending entries.")
-	journalLag := metrics.Default.Gauge("trading_risk_journal_lag_seconds", "risk:journal producer-to-now lag.")
+	journalLag := metrics.Default.Gauge("trading_risk_journal_lag_seconds", "Age of the oldest pending risk:journal entry.")
 	outboxPending := metrics.Default.Gauge("trading_outbox_pending", "Pending outbox rows.", "service")
 	outboxAge := metrics.Default.Gauge("trading_outbox_oldest_age_seconds", "Oldest pending outbox event age.", "service")
 	go func() {

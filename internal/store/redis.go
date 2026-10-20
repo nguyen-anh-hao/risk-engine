@@ -249,6 +249,11 @@ func (s *RedisStore) Withdraw(ctx context.Context, accountID uint64, asset strin
 }
 
 // JournalStats exposes Redis Stream backlog/lag for monitoring.
+//
+// Lag is the age of the oldest unacknowledged entry, not the time since the
+// last event was produced. The previous implementation used the stream's
+// last-generated id, which grew without bound whenever the engine was idle and
+// said nothing about the DB materialization being behind.
 func (s *RedisStore) JournalStats(ctx context.Context) (length, pending int64, lagSeconds float64, err error) {
 	length, err = s.rdb.XLen(ctx, "risk:journal").Result()
 	if err != nil {
@@ -258,17 +263,37 @@ func (s *RedisStore) JournalStats(ctx context.Context) (length, pending int64, l
 	if perr == nil && pend != nil {
 		pending = pend.Count
 	}
-	info, ierr := s.rdb.XInfoStream(ctx, "risk:journal").Result()
-	if ierr == nil && info != nil && info.LastGeneratedID != "" {
-		parts := strings.SplitN(info.LastGeneratedID, "-", 2)
-		if ms, perr := strconv.ParseInt(parts[0], 10, 64); perr == nil {
-			lagSeconds = time.Since(time.UnixMilli(ms)).Seconds()
-			if lagSeconds < 0 {
-				lagSeconds = 0
-			}
+	if pending == 0 {
+		return
+	}
+	oldest, oerr := s.rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: "risk:journal",
+		Group:  "risk-journal",
+		Start:  "-",
+		End:    "+",
+		Count:  1,
+	}).Result()
+	if oerr != nil || len(oldest) == 0 {
+		return
+	}
+	if ms, ok := streamIDMillis(oldest[0].ID); ok {
+		lagSeconds = time.Since(time.UnixMilli(ms)).Seconds()
+		if lagSeconds < 0 {
+			lagSeconds = 0
 		}
 	}
 	return
+}
+
+// streamIDMillis extracts the millisecond timestamp from a Redis Stream id
+// such as 1792428815540-0.
+func streamIDMillis(id string) (int64, bool) {
+	parts := strings.SplitN(id, "-", 2)
+	if len(parts) == 0 {
+		return 0, false
+	}
+	ms, err := strconv.ParseInt(parts[0], 10, 64)
+	return ms, err == nil
 }
 
 // Snapshot returns all balances for the journal worker's DB materialization.
